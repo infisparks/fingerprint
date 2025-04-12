@@ -3,9 +3,9 @@
 //--------------------------------------------------
 const express = require("express");
 const bodyParser = require("body-parser");
-const axios = require("axios"); // <-- Make sure to install with npm install axios
+const axios = require("axios"); // Ensure you have installed axios
 
-// 1) Import the modular functions from firebase/app and firebase/database
+// 1) Import Firebase modules
 const { initializeApp } = require("firebase/app");
 const {
   getDatabase,
@@ -17,7 +17,7 @@ const {
   remove
 } = require("firebase/database");
 
-// 2) Use your provided config object
+// 2) Your Firebase configuration object
 const firebaseConfig = {
   apiKey: "AIzaSyCiDY2TfTphkwM86FkVMYf-B3m_2ih0jo",
   authDomain: "ambulance-89a48.firebaseapp.com",
@@ -29,7 +29,7 @@ const firebaseConfig = {
   measurementId: "G-BS76WR1G13"
 };
 
-// 3) Initialize the Firebase app and get the database
+// 3) Initialize Firebase and get the database
 const appFirebase = initializeApp(firebaseConfig);
 const db = getDatabase(appFirebase);
 
@@ -41,8 +41,6 @@ app.use(bodyParser.json());
 // Helper function: sendWhatsApp
 async function sendWhatsApp(number, message) {
   try {
-    // We'll assume the token is always "9958399157" from your example
-    // Format the phone number with "91" prefix
     const postBody = {
       token: "9958399157",
       number: `91${number}`,
@@ -77,47 +75,45 @@ app.get("/enroll", async (req, res) => {
 
 /**
  * POST /enroll
- * Expected payload: 
+ * Expected payload:
  * {
  *   "fingerprintID": <number>,
  *   "name": "<string>",
  *   "number": "<string>",
- *   "rollNumber": "<string>"
+ *   "rollNumber": "<string>",
+ *   "sem": "<string>",
+ *   "branch": "<string>"
  * }
  */
 app.post("/enroll", async (req, res) => {
   try {
-    const { fingerprintID, name, number, rollNumber } = req.body;
+    const { fingerprintID, name, number, rollNumber, sem, branch } = req.body;
     if (!fingerprintID) {
       return res.status(400).json({ error: "Missing fingerprintID" });
     }
 
-    // Create user data
     const userData = {
       id: fingerprintID,
       name: name || "",
       number: number || "",
       rollNumber: rollNumber || "",
+      sem: sem || "",
+      branch: branch || "",
       createdAt: Date.now()
     };
 
-    // 1) Create a new child in /users
     const newUserRef = push(ref(db, "/users"));
     await set(newUserRef, userData);
 
-    // 2) Get the push key and update the record with it
     const pushKey = newUserRef.key;
     await update(newUserRef, { pushKey });
 
-    // 3) Create a mapping for fast lookup: /fingerprints/<fingerprintID> => pushKey
     await set(ref(db, `/fingerprints/${fingerprintID}`), pushKey);
 
-    // 4) Remove the /id node
     await remove(ref(db, "/id"));
 
     console.log("New user enrolled with pushKey:", pushKey);
 
-    // 5) Send WhatsApp message (if user has phone number)
     if (number && number.trim() !== "") {
       const dateString = new Date().toLocaleString();
       const msg = `Hello ${name}, your enrollment was successful on ${dateString}. Thank you!`;
@@ -146,7 +142,6 @@ app.post("/attendance", async (req, res) => {
     const fingerprintSnap = await get(fingerprintRef);
     let pushKey = fingerprintSnap.val();
 
-    // If mapping not found, manually search /users
     if (!pushKey) {
       const usersSnap = await get(ref(db, "/users"));
       if (!usersSnap.exists()) {
@@ -156,7 +151,7 @@ app.post("/attendance", async (req, res) => {
 
       pushKey = null;
       for (const key in usersData) {
-        if (usersData.hasOwnProperty(key)) {
+        if (Object.hasOwnProperty.call(usersData, key)) {
           const user = usersData[key];
           if (Number(user.id) === Number(fingerprintID)) {
             pushKey = key;
@@ -169,11 +164,9 @@ app.post("/attendance", async (req, res) => {
         return res.status(404).json({ error: "User not found for fingerprintID" });
       }
 
-      // Save mapping
       await set(fingerprintRef, pushKey);
     }
 
-    // Retrieve user data
     const userRef = ref(db, "/users/" + pushKey);
     const userSnap = await get(userRef);
     if (!userSnap.exists()) {
@@ -181,20 +174,39 @@ app.post("/attendance", async (req, res) => {
     }
     const userData = userSnap.val();
 
-    // Record attendance
+    // Fetch the active subject for this user’s branch and sem
+    let actualSubject = "UnknownSubject";
+    try {
+      const currentAttendanceRef = ref(db, `/currentattendance/${userData.branch}/${userData.sem}`);
+      const currentAttendanceSnap = await get(currentAttendanceRef);
+      if (currentAttendanceSnap.exists()) {
+        const subjectData = currentAttendanceSnap.val();
+        if (typeof subjectData === "object" && subjectData.subject) {
+          actualSubject = subjectData.subject;
+        } else if (typeof subjectData === "string") {
+          actualSubject = subjectData;
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching current attendance subject:", err.message);
+    }
+
+    // Record attendance with the active subject
     const attendanceRef = push(ref(db, `/users/${pushKey}/attendance`));
     const attendanceData = {
       timestamp: Date.now(),
-      attended: true
+      attended: true,
+      subject: actualSubject,
+      sem: userData.sem || "",
+      branch: userData.branch || ""
     };
     await set(attendanceRef, attendanceData);
 
     console.log("Attendance marked for pushKey:", pushKey);
 
-    // Send WhatsApp if user has number
     if (userData.number && userData.number.trim() !== "") {
       const dateString = new Date().toLocaleString();
-      const msg = `Hello ${userData.name}, your attendance has been marked on ${dateString}. Thank you!`;
+      const msg = `Hello ${userData.name}, your attendance has been marked on ${dateString} for subject: ${actualSubject}. Thank you!`;
       await sendWhatsApp(userData.number, msg);
     }
 
@@ -210,7 +222,7 @@ app.post("/attendance", async (req, res) => {
   }
 });
 
-// Optional: Legacy /register
+// Optional: Legacy /register endpoint
 app.post("/register", async (req, res) => {
   try {
     const { id, name } = req.body;
